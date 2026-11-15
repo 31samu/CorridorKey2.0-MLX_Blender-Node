@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import uuid
@@ -78,12 +79,45 @@ def has_bake(node):
     return node.node_tree.nodes[KEYED_FRAMES].image is not None
 
 
+def image_path(image):
+    return Path(bpy.path.abspath(image.filepath, library=image.library)).resolve()
+
+
+def bake_cache_directory(tree):
+    keyed_path = image_path(tree.nodes[KEYED_FRAMES].image)
+    result = keyed_path.parent.parent
+    job = result.parent
+    if result.name != "result" or not re.fullmatch(r"[0-9a-f]{32}", job.name):
+        return None
+
+    # The recorded path can be from before the project and cache were moved.
+    config = json.loads((job / "bake.json").read_text())
+    if not isinstance(config, dict):
+        return None
+    destination = config.get("destination")
+    if not isinstance(destination, str) or Path(destination).parts[-2:] != (job.name, "baked-input"):
+        return None
+
+    for sequence in backend.output_sequences(result):
+        image = tree.nodes[sequence.node_name].image
+        if image:
+            path = image_path(image)
+            if path.parent != sequence.folder or path.suffix != sequence.extension:
+                return None
+    return job
+
+
 class CorridorKeyPreferences(AddonPreferences):
     bl_idname = ADDON_ID
 
     executable: StringProperty(name="MLX executable", subtype="FILE_PATH")
     model_root: StringProperty(name="FP16 model folder", subtype="DIR_PATH")
     cache_root: StringProperty(name="Cache folder", subtype="DIR_PATH")
+    delete_cache_on_clear: BoolProperty(
+        name="Delete Cache Files on Clear Bake",
+        description="Permanently delete the discarded bake's files. Undo and other blend files may still refer to them",
+        default=False,
+    )
     show_advanced: BoolProperty(name="Advanced", default=False)
 
     def draw(self, context):
@@ -96,6 +130,7 @@ class CorridorKeyPreferences(AddonPreferences):
             layout.prop(self, "executable")
             layout.prop(self, "model_root")
             layout.prop(self, "cache_root")
+            layout.prop(self, "delete_cache_on_clear")
 
 
 class CorridorKeyNode(CompositorNodeCustomGroup):
@@ -180,8 +215,8 @@ class CorridorKeyNode(CompositorNodeCustomGroup):
 
 def add_processing_sockets(tree):
     for name, description in (
-        (ALPHA_HINT, "Rough alpha for the first analyzed frame. White previews the foreground hint."),
-        (GARBAGE_MASK, "White keeps the foreground. Excluded areas preview as black before analysis."),
+        (ALPHA_HINT, "Rough alpha for the first analyzed frame. A white overlay previews the foreground hint."),
+        (GARBAGE_MASK, "White keeps the foreground. The preview darkens excluded areas before analysis."),
     ):
         socket = tree.interface.new_socket(
             name=name, in_out="INPUT", socket_type="NodeSocketFloat", description=description,
@@ -245,30 +280,46 @@ def organize_sockets(tree):
     interface.move_to_parent(sockets["INPUT", ALPHA_HINT], panel, len(MORE_OUTPUTS))
 
 
+def add_preview_mix(tree, label):
+    mix = tree.nodes.new("ShaderNodeMix")
+    mix.label = label
+    mix.data_type = "RGBA"
+    inputs = {socket.identifier: socket for socket in mix.inputs}
+    result = next(socket for socket in mix.outputs if socket.identifier == "Result_Color")
+    return inputs["Factor_Float"], inputs["A_Color"], inputs["B_Color"], result
+
+
 def add_mask_preview(tree):
     group_input = next(node for node in tree.nodes if node.type == "GROUP_INPUT")
     image = group_input.outputs["Image"]
-    for mask, color, label in (
-        (ALPHA_HINT, 1, "Preview Alpha Hint"),
-        (GARBAGE_MASK, 0, "Preview Garbage Mask"),
-    ):
-        mix = tree.nodes.new("ShaderNodeMix")
-        mix.label = label
-        mix.data_type = "RGBA"
-        sockets = {socket.identifier: socket for socket in mix.inputs}
-        tree.links.new(group_input.outputs[mask], sockets["Factor_Float"])
-        source_socket, color_socket = ("A_Color", "B_Color") if color else ("B_Color", "A_Color")
-        tree.links.new(image, sockets[source_socket])
-        sockets[color_socket].default_value = (color, color, color, 1)
-        image = next(socket for socket in mix.outputs if socket.identifier == "Result_Color")
+    links = tree.links
+
+    strength = tree.nodes.new("ShaderNodeMath")
+    strength.label = "Alpha Hint Preview Strength"
+    strength.operation = "MULTIPLY"
+    strength.inputs[1].default_value = 0.65
+    links.new(group_input.outputs[ALPHA_HINT], strength.inputs[0])
+    hint_factor, hint_source, hint_color, hinted = add_preview_mix(tree, "Preview Alpha Hint")
+    links.new(strength.outputs[0], hint_factor)
+    links.new(image, hint_source)
+    hint_color.default_value = (1, 1, 1, 1)
+
+    darkened = tree.nodes.new("CompositorNodeExposure")
+    darkened.label = "Darken Excluded Areas"
+    darkened.inputs["Exposure"].default_value = -4
+    links.new(image, darkened.inputs["Image"])
+    keep_factor, excluded, kept, preview_image = add_preview_mix(tree, "Preview Garbage Mask")
+    links.new(group_input.outputs[GARBAGE_MASK], keep_factor)
+    links.new(darkened.outputs["Image"], excluded)
+    links.new(hinted, kept)
 
     original = tree.nodes.new("CompositorNodeSeparateColor")
-    tree.links.new(group_input.outputs["Image"], original.inputs["Image"])
+    links.new(image, original.inputs["Image"])
     preview = tree.nodes.new("CompositorNodeSetAlpha")
     preview.name = PREVIEW_NODE
     preview.inputs["Type"].default_value = "Replace Alpha"
-    tree.links.new(image, preview.inputs["Image"])
-    tree.links.new(original.outputs["Alpha"], preview.inputs["Alpha"])
+    links.new(preview_image, preview.inputs["Image"])
+    links.new(original.outputs["Alpha"], preview.inputs["Alpha"])
 
 
 def update_image_output(tree):
@@ -580,7 +631,7 @@ class CorridorKeyCancel(Operator):
 class CorridorKeyClearBake(Operator):
     bl_idname = "node.corridorkey_mlx_clear_bake"
     bl_label = "Clear Bake"
-    bl_description = "Clear this node's bake and return to the source preview. Keep cached files on disk"
+    bl_description = "Clear this node's bake and return to the source preview. See preferences for cache deletion"
     bl_options = {"UNDO"}
 
     node_name: StringProperty()
@@ -589,7 +640,22 @@ class CorridorKeyClearBake(Operator):
         node = get_node(context, self.node_name)
         if not node or node.as_pointer() in JOBS or not has_bake(node):
             return {"CANCELLED"}
+        prefs = context.preferences.addons[ADDON_ID].preferences
+        delete_cache = prefs.delete_cache_on_clear
+        if delete_cache and JOBS:
+            self.report({"WARNING"}, ANALYSIS_BUSY_MESSAGE)
+            return {"CANCELLED"}
+
         tree = node.node_tree
+        directory = None
+        if delete_cache:
+            try:
+                directory = bake_cache_directory(tree)
+            except (OSError, ValueError):
+                pass
+            if directory is None:
+                self.report({"WARNING"}, "CorridorKey could not identify this bake's cache. Files were kept.")
+
         for name in SEQUENCE_NODES:
             source = tree.nodes[name]
             image = source.image
@@ -598,6 +664,17 @@ class CorridorKeyClearBake(Operator):
                 bpy.data.images.remove(image)
         update_image_output(tree)
         node.status = ""
+        if directory is not None:
+            try:
+                if any(
+                    image.users and image.filepath and image_path(image).is_relative_to(directory)
+                    for image in bpy.data.images
+                ):
+                    self.report({"WARNING"}, "Cache files were kept because this project still uses them.")
+                else:
+                    shutil.rmtree(directory)
+            except OSError as error:
+                self.report({"WARNING"}, f"Could not delete the bake cache: {error}")
         return {"FINISHED"}
 
 
