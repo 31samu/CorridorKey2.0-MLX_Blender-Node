@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 id = "corridorkey_mlx_compositor"
-version = "0.3.13"
+version = "0.3.18"
 name = "CorridorKey MLX Node"
 tagline = "Key green-screen footage with CorridorKey2.0"
-maintainer = "Community extension"
+maintainer = "Samuel Kremer (e1samu)"
 type = "add-on"
 tags = ["Compositing"]
 blender_version_min = "5.3.0"
