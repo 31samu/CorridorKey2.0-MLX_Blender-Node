@@ -8,8 +8,9 @@ If you already have a working backend, use the executable and model folder field
 ## Use the node
 
 1. In the scene compositor or a Sequencer strip's Compositor modifier, choose **Add → Keying → CorridorKey2.0 (MLX)** and connect its **Image** input. The editable **Start Frame** and **End Frame** fields fill from the strip's visible range or the linked Image node's media. For other graphs, they use the scene range. The bake fits the source into the selected model's frame without stretching it.
-2. Click **Analyze**. The node shows frame counts as it bakes, analyzes, and keys. Connect its **Image output** to the **Foreground** input of an **Alpha Over** node, or to **Group Output → Image** to replace a Sequencer strip's image. 
-3. Re-analyze after changing the source or screen color. If a job fails, look for `analysis.log` in the job folder within the cache directory. The default cache is `corridorkey-cache` next to the saved blend file.
+2. Before analysis, the **Image** output previews the source. The **Alpha Hint** under **More** shows the hinted foreground in white. The **Garbage Mask** shows excluded areas in black, including where the two masks overlap.
+3. Click **Analyze**. The node shows frame counts as it bakes, analyzes, and keys. Connect its **Image** output to the **Foreground** input of an **Alpha Over** node, or to **Group Output → Image** to replace a Sequencer strip's image.
+4. Click **Clear Bake** to return to the source preview before analyzing again. The cached files stay on disk. If a job fails, look for `analysis.log` in the job folder within the cache directory. The default cache is `corridorkey-cache` next to the saved blend file.
 
 ## Model resolutions
 
@@ -21,5 +22,5 @@ Native 1920 × 1080 needs a 1152 × 1920 graph. Native 3840 × 2160 needs a 2176
 
 The node reads the analysis cache during playback and render. Keep the cache with the project. The cache uses a new folder for each analysis, so you can remove earlier folders once any blend files that reference them have been retired.
 
-![extension settings pane](settings.webp)
-![dowload dialog](download.webp)
+![extension settings pane](images/settings.webp)
+![dowload dialog](images/download.webp)

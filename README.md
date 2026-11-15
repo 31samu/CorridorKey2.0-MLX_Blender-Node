@@ -13,7 +13,7 @@ I want to improve this a bit further, maybe including supporting windows and lin
   
 This repository only hosts the blender add-on framework and workings, the actual key is hosted elsewhere and has to be downloaded separately (the extension can do it for you).  
 
-![preview of the blender compositor node](node.webp)
+![preview of the blender compositor node](images/node.webp)
 
 Some notes on the design of the node:
 
