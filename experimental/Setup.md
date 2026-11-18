@@ -2,27 +2,21 @@
 
 Install the experimental extension ZIP in Blender 5.3 or later via **Preferences → Get Extensions → Install from Disk**. It uses the same extension ID as the Mac release, so installing this build replaces that copy and reuses its installed MLX runtime and models.
 
+On Mac and Windows, **Preferences → Add-ons → CorridorKey Node (Experimental) → Open Downloaded Runtime Folder** opens the managed setup folder once it exists, even if setup did not finish. It does not open manually configured paths or the analysis cache. To remove the downloads, open the folder, quit Blender, then delete the folder in Finder or Explorer.
+
 ## Windows with NVIDIA (experimental)
 
-Use 64-bit Windows, an NVIDIA RTX 30-series or newer GPU, a driver compatible with CUDA 12.8, Python 3.12, Git, and FFmpeg. This build uses a manually installed copy of the [upstream CorridorKey 2.0 CUDA runtime](https://github.com/nikopueringer/CorridorKey2.0#setup). Its weights take about 5 GB. The extension does not install Python, PyTorch, or the weights on Windows.
+Use 64-bit Windows and an NVIDIA RTX 30-series or newer GPU with a current driver that supports CUDA 12.8. Allow at least 12 GB of free space for setup and enable **Allow Online Access** in Blender's System preferences. [Upstream GPU requirements](https://github.com/nikopueringer/CorridorKey2.0#setup)
 
-In PowerShell:
+1. Under **Preferences → Add-ons → CorridorKey Node (Experimental)**, click **Set Up CorridorKey**, then **Download and Install**.
+2. Wait for **CUDA runtime and models installed**. Setup downloads several gigabytes and installs Python, PyTorch with CUDA, FFmpeg, and the CorridorKey runtime and weights in `%LOCALAPPDATA%\CorridorKeyBlender\cuda-1`. Analysis uses these files automatically. No terminal commands or separate Python, Git, or FFmpeg installation are needed.
+3. Add **Keying → CorridorKey2.0 (CUDA)** in the scene compositor and connect a short green-screen clip. Set a small frame range and click **Analyze**.
 
-```powershell
-git clone https://github.com/nikopueringer/CorridorKey2.0.git
-cd CorridorKey2.0
-py -3.12 -m venv venv
-.\venv\Scripts\python.exe -m pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
-.\venv\Scripts\python.exe scripts\download_weights.py
-.\venv\Scripts\python.exe -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
-```
+If setup fails, Blender reports the location of `setup-*.log` in the runtime folder. A previous manual installation can still be selected under **Advanced**. Clear **CUDA Python**, **CorridorKey 2.0 folder**, and **FFmpeg executable** to return to the managed installation.
 
-In **Preferences → Add-ons → CorridorKey Node (Experimental)**, set **CUDA Python** to `venv\Scripts\python.exe` and **CorridorKey 2.0 folder** to the checkout containing `infer.py`. If FFmpeg is missing from Blender's PATH, set **FFmpeg executable** to the full path to `ffmpeg.exe`.
+For the first test, set the scene render size to 1280 × 720 at 100%. The node uses the scene's render size including the resolution percentage. Its input and output plates are scene-linear EXR in Linear Rec.709. The Windows node supports green screen and exposes **Image**, **Matte**, **Raw Foreground**, and **Edges** in the scene compositor.
 
-Start with a few frames of green-screen footage in the **scene compositor** at a modest render resolution such as 1280 × 720. Add **Keying → CorridorKey2.0 (CUDA)** and follow the steps below. The node uses the scene's render size including the resolution percentage. Its input and output plates are scene-linear EXR in Linear Rec.709. It exposes **Image**, **Matte**, **Raw Foreground**, and **Edges**. The upstream cutout includes green despill. Blue-screen controls, a separate despilled foreground sequence, and Sequencer strip baking are outside this first Windows build.
-
-For a Windows test report, include the GPU, driver, Blender version, the upstream revision from `git rev-parse HEAD`, and the job's `analysis.log` if it fails. Check frame alignment and alpha, then try canceling a longer analysis and running it again. CUDA inference and Windows cancellation still need a test on actual Windows RTX hardware.
+For a Windows test report, include the GPU, driver, Blender and extension versions, and the relevant log. Send `setup-*.log` for an installation failure or `analysis.log` for an analysis failure. Check frame alignment and alpha, then try canceling a longer analysis and running it again. Automatic setup and CUDA inference still need a test on actual Windows RTX hardware.
 
 ## macOS with Apple Silicon
 

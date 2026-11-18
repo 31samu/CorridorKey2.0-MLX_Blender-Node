@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import signal
 import subprocess
 import sys
 import uuid
@@ -13,22 +12,59 @@ import uuid
 import bpy
 
 from .mlx_backend import LARGE_MODEL_FILES, large_model_ready
+from . import process_control, setup_cuda_runtime
 
 ADDON_ID = __package__
 MODEL_FILES = json.loads(Path(__file__).with_name("setup-model-files.json").read_text())
 MODEL_LICENSE = "https://huggingface.co/cdelta/CorridorKey-v2-MLX-fp16/blob/main/LICENSE"
+CUDA_LICENSE = "https://huggingface.co/nikopueringer/CorridorKey2.0/blob/main/LICENSE"
+WINDOWS = sys.platform == "win32"
 active_setup = None
 
 
 def setup_available():
+    if WINDOWS:
+        return platform.machine().lower() in {"amd64", "x86_64"}
     return platform.machine() == "arm64" and int(platform.mac_ver()[0].split(".")[0] or 0) >= 26
 
 
-def runtime_root(create=False):
-    path = bpy.utils.extension_path_user(ADDON_ID, path="runtime-1", create=create)
+def runtime_root(create=False, cuda=False):
+    if cuda and (local := os.environ.get("LOCALAPPDATA")):
+        path = Path(local) / "CorridorKeyBlender" / "cuda-1"
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+    if cuda:
+        path = bpy.utils.extension_path_user(ADDON_ID, path="cuda-1", create=create)
+    else:
+        path = bpy.utils.extension_path_user(ADDON_ID, path="runtime-1", create=create)
     if not path:
         raise OSError("Could not locate CorridorKey's extension storage.")
     return Path(path)
+
+
+def managed_cuda_paths():
+    try:
+        return setup_cuda_runtime.installed_paths(runtime_root(cuda=True))
+    except OSError:
+        return None
+
+
+def cuda_analysis_paths(prefs):
+    if prefs.cuda_python or prefs.cuda_checkout:
+        if not prefs.cuda_python or not prefs.cuda_checkout:
+            raise ValueError("Set both Advanced CUDA paths or clear both to use automatic setup.")
+        python = Path(bpy.path.abspath(prefs.cuda_python)).expanduser().absolute()
+        checkout = Path(bpy.path.abspath(prefs.cuda_checkout)).expanduser().resolve()
+        ffmpeg = "ffmpeg"
+    else:
+        paths = managed_cuda_paths()
+        if paths is None:
+            raise ValueError("Click Set Up CorridorKey in the extension preferences first.")
+        python, checkout, ffmpeg = paths
+    if prefs.cuda_ffmpeg:
+        ffmpeg = bpy.path.abspath(prefs.cuda_ffmpeg)
+    return python, checkout, ffmpeg
 
 
 def managed_paths():
@@ -69,7 +105,7 @@ def analysis_paths(prefs):
 class CorridorKeySetup(bpy.types.Operator):
     bl_idname = "preferences.corridorkey_setup"
     bl_label = "Set Up CorridorKey"
-    bl_description = "Install the local runtime and download FP16 models"
+    bl_description = "Install the local runtime and download model weights"
     large_model: bpy.props.BoolProperty(options={"SKIP_SAVE"})
     include_large_model: bpy.props.BoolProperty(
         name="Also download the 1536 × 1024 model",
@@ -79,7 +115,8 @@ class CorridorKeySetup(bpy.types.Operator):
 
     def invoke(self, context, event):
         if not setup_available():
-            self.report({"ERROR"}, "Automatic setup requires Apple Silicon and macOS 26 or later.")
+            requirement = "64-bit Windows on x86-64" if WINDOWS else "Apple Silicon and macOS 26 or later"
+            self.report({"ERROR"}, f"Automatic setup requires {requirement}.")
             return {"CANCELLED"}
         if not bpy.app.online_access:
             self.report({"ERROR"}, "Enable Allow Online Access in Blender's System preferences first.")
@@ -91,7 +128,11 @@ class CorridorKeySetup(bpy.types.Operator):
 
     def draw(self, context):
         column = self.layout.column(align=True)
-        if self.large_model:
+        if WINDOWS:
+            column.label(text="Installs Python, PyTorch CUDA, FFmpeg and models.")
+            column.label(text="Download: several GB. Allow 12 GB free disk space.")
+            column.label(text="Requires a compatible NVIDIA GPU and driver.")
+        elif self.large_model:
             column.label(text="Reuses matching weights from the 720p model.")
             column.label(text="Download size: up to 2.54 GB")
         else:
@@ -102,32 +143,34 @@ class CorridorKeySetup(bpy.types.Operator):
         self.layout.separator()
         row = self.layout.row()
         row.alignment = "LEFT"
-        row.operator("wm.url_open", text="Model License", icon="URL").url = MODEL_LICENSE
+        row.operator("wm.url_open", text="Model License", icon="URL").url = CUDA_LICENSE if WINDOWS else MODEL_LICENSE
 
     def execute(self, context):
         global active_setup
         if active_setup is not None or not bpy.app.online_access or not setup_available():
             return {"CANCELLED"}
         try:
-            root = runtime_root(create=True)
-            self.model_root = selected_model_root(context.preferences.addons[ADDON_ID].preferences) if self.large_model else root / "models"
-            if self.model_root is None:
-                raise OSError("Set up the runtime or configure both Advanced paths first.")
-            command = [sys.executable, "-I", str(Path(__file__).with_name("setup_runtime.py")), str(root)]
-            if self.large_model:
-                command.append(str(self.model_root))
-            elif self.include_large_model:
-                command.append("--include-large-model")
+            root = runtime_root(create=True, cuda=WINDOWS)
+            script = "setup_cuda_runtime.py" if WINDOWS else "setup_runtime.py"
+            command = [sys.executable, "-I", "-X", "utf8", str(Path(__file__).with_name(script)), str(root)]
+            if not WINDOWS:
+                self.model_root = selected_model_root(context.preferences.addons[ADDON_ID].preferences) if self.large_model else root / "models"
+                if self.model_root is None:
+                    raise OSError("Set up the runtime or configure both Advanced paths first.")
+                if self.large_model:
+                    command.append(str(self.model_root))
+                elif self.include_large_model:
+                    command.append("--include-large-model")
             self.log = root / f"setup-{uuid.uuid4().hex[:12]}.log"
             with self.log.open("wb") as log:
                 self.process = subprocess.Popen(
                     command,
-                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                    stdout=log, stderr=subprocess.STDOUT, **process_control.launch_options(),
                 )
         except OSError as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
-        self.steps = 4 if self.include_large_model and not self.large_model else 3
+        self.steps = 4 if WINDOWS or (self.include_large_model and not self.large_model) else 3
         self.step = "1"
         self.message = "Preparing model download…" if self.large_model else f"1/{self.steps} · Starting setup…"
         self.progress = None
@@ -150,13 +193,15 @@ class CorridorKeySetup(bpy.types.Operator):
         if self.cancelled:
             self.report({"INFO"}, "Setup cancelled. Run it again to resume model downloads.")
             return {"CANCELLED"}
-        ready = self.large_model or managed_paths() is not None
-        if self.large_model or self.include_large_model:
+        ready = managed_cuda_paths() is not None if WINDOWS else self.large_model or managed_paths() is not None
+        if not WINDOWS and (self.large_model or self.include_large_model):
             ready = ready and large_model_ready(self.model_root)
         if result != 0 or not ready:
             self.report({"ERROR"}, f"CorridorKey setup failed. See {self.log}")
             return {"CANCELLED"}
-        if self.large_model:
+        if WINDOWS:
+            message = "CorridorKey CUDA is ready."
+        elif self.large_model:
             message = "1536 × 1024 model is ready."
         elif self.include_large_model:
             message = "CorridorKey 720p and 1536 × 1024 models are ready."
@@ -176,7 +221,7 @@ class CorridorKeySetup(bpy.types.Operator):
                         self.message = prefix + label
                         break
             self.progress = None
-            if self.step in {"2", "4"}:
+            if not WINDOWS and self.step in {"2", "4"}:
                 is_large = self.large_model or self.step == "4"
                 files = LARGE_MODEL_FILES if is_large else MODEL_FILES
                 total = sum(metadata["size"] for metadata in files.values())
@@ -207,10 +252,7 @@ class CorridorKeySetup(bpy.types.Operator):
 
     def stop(self):
         self.cancelled = True
-        try:
-            os.killpg(self.process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        process_control.stop(self.process)
 
     def cancel(self, context):
         self.stop()
@@ -241,14 +283,27 @@ def draw_setup(layout, prefs):
         else:
             layout.progress(factor=active_setup.progress, type="BAR", text=active_setup.message)
         layout.operator(CorridorKeySetupCancel.bl_idname)
+    elif WINDOWS:
+        if managed_cuda_paths() is not None:
+            layout.label(text="CUDA runtime and models installed", icon="CHECKMARK")
+            if prefs.cuda_python or prefs.cuda_checkout or prefs.cuda_ffmpeg:
+                layout.label(text="Advanced CUDA paths override automatic setup.")
+        else:
+            layout.operator(CorridorKeySetup.bl_idname)
     elif managed_paths() is not None:
         layout.label(text="720p model and runtime installed", icon="CHECKMARK")
         if prefs.executable or prefs.model_root:
             layout.label(text="Advanced paths override automatic setup.")
     elif not (prefs.executable and prefs.model_root):
         layout.operator(CorridorKeySetup.bl_idname)
-    if active_setup is None and (models := selected_model_root(prefs)) and not large_model_ready(models):
+    if not WINDOWS and active_setup is None and (models := selected_model_root(prefs)) and not large_model_ready(models):
         layout.operator(CorridorKeySetup.bl_idname, text="Download 1536 × 1024 Model").large_model = True
+    try:
+        root = runtime_root(cuda=WINDOWS)
+        if root.is_dir():
+            layout.operator("wm.path_open", text="Open Downloaded Runtime Folder", icon="FILE_FOLDER").filepath = str(root)
+    except OSError:
+        pass
 
 
 CLASSES = (CorridorKeySetup, CorridorKeySetupCancel)

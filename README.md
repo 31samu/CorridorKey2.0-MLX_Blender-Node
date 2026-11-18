@@ -1,8 +1,9 @@
-# CorridorKey2.0 MLX Blender Add-On  
+# CorridorKey2.0 MLX Blender Add-On
+![my corridorkey logo](images/corridorkey.png)
 
 [Download](https://raw.githubusercontent.com/31samu/CorridorKey2.0-MLX_Blender-Node/main/UNZIPME.zip)
   
-This is a blender add-on integration of the [MLX port](https://github.com/peterteravskis/corridorkey-v2-mlx) by Peter Teravskis of [CorridorKey2.0](https://github.com/nikopueringer/CorridorKey2.0) by Niko Pueringer.   
+This is a blender add-on integration of the [MLX port](https://github.com/peterteravskis/corridorkey-v2-mlx) by Peter Teravskis of [CorridorKey2.0](https://github.com/nikopueringer/CorridorKey2.0) by Niko Pueringer, though not affiliated with them.   
 This extension was made using AI, if you want to stay away from anything related to it, I totally understand.  
   
 The extension gives you a node in the compositor in which you can plug a video sequence and after an analysis it outputs the keyed result as well as a mask.   

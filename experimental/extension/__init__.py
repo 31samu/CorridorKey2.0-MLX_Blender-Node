@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import uuid
@@ -14,7 +13,7 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 from bpy.types import AddonPreferences, CompositorNodeCustomGroup, Operator
 
-from . import cuda_backend, mlx_backend, setup_ui
+from . import cuda_backend, mlx_backend, process_control, setup_ui
 from .sequences import DESPILLED_FOREGROUND, FOREGROUND_OUTPUTS, KEYED_FRAMES, SEQUENCE_NODES
 
 ADDON_ID = __package__
@@ -35,7 +34,7 @@ def cache_root(prefs):
         return Path(bpy.path.abspath(prefs.cache_root)).expanduser().resolve()
     if bpy.data.filepath:
         return Path(bpy.data.filepath).parent / "corridorkey-cache"
-    return setup_ui.runtime_root().parent / "analysis-cache"
+    return setup_ui.runtime_root(cuda=USE_CUDA).parent / "analysis-cache"
 
 
 def publish_sequences(node, sequences, start_frame, frame_count):
@@ -131,17 +130,16 @@ class CorridorKeyPreferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        if USE_CUDA:
-            layout.prop(self, "cuda_python")
-            layout.prop(self, "cuda_checkout")
-            layout.prop(self, "cuda_ffmpeg")
-        else:
-            setup_ui.draw_setup(layout, self)
+        setup_ui.draw_setup(layout, self)
         row = layout.row(align=True)
         row.alignment = "LEFT"
         row.prop(self, "show_advanced", emboss=False, icon="TRIA_DOWN" if self.show_advanced else "TRIA_RIGHT")
         if self.show_advanced:
-            if not USE_CUDA:
+            if USE_CUDA:
+                layout.prop(self, "cuda_python")
+                layout.prop(self, "cuda_checkout")
+                layout.prop(self, "cuda_ffmpeg")
+            else:
                 layout.prop(self, "executable")
                 layout.prop(self, "model_root")
             layout.prop(self, "cache_root")
@@ -462,11 +460,7 @@ def get_node(context, name):
 def prepare_analysis(context, node, prefs, destination):
     output = destination / "result"
     if USE_CUDA:
-        if not prefs.cuda_python or not prefs.cuda_checkout:
-            raise ValueError("Set the CUDA Python and CorridorKey 2.0 folder in the add-on preferences.")
-        python = Path(bpy.path.abspath(prefs.cuda_python)).expanduser().absolute()
-        checkout = Path(bpy.path.abspath(prefs.cuda_checkout)).expanduser().resolve()
-        ffmpeg = bpy.path.abspath(prefs.cuda_ffmpeg) if prefs.cuda_ffmpeg else "ffmpeg"
+        python, checkout, ffmpeg = setup_ui.cuda_analysis_paths(prefs)
         cuda_backend.validate_runtime(python, checkout, ffmpeg)
         render = context.scene.render
         percent = render.resolution_percentage
@@ -554,9 +548,9 @@ class CorridorKeyAnalyze(Operator):
 
     def launch(self, command):
         with self.log.open("ab") as log:
-            options = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {"start_new_session": True}
             self.process = subprocess.Popen(
-                command, stdout=log, stderr=subprocess.STDOUT, cwd=self.destination, **options,
+                command, stdout=log, stderr=subprocess.STDOUT, cwd=self.destination,
+                **process_control.launch_options(),
             )
 
     def remove_snapshot(self):
@@ -568,24 +562,7 @@ class CorridorKeyAnalyze(Operator):
 
     def request_cancel(self):
         self.cancelled = True
-        if sys.platform == "win32":
-            if self.process.poll() is None:
-                taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
-                try:
-                    subprocess.run(
-                        [str(taskkill), "/PID", str(self.process.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW, timeout=3,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                if self.process.poll() is None:
-                    self.process.kill()
-            return
-        try:
-            os.killpg(self.process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        process_control.stop(self.process)
 
     def modal(self, context, event):
         if event.type != "TIMER":

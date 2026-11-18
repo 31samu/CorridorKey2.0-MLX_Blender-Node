@@ -24,7 +24,7 @@ def validate_runtime(python, checkout, ffmpeg):
 
 def analysis_command(python, checkout, ffmpeg, config, output, fps):
     command = [
-        str(python), "-u", str(checkout / "infer.py"),
+        str(python), "-E", "-s", "-X", "utf8", "-u", str(checkout / "infer.py"),
         "--input", config["destination"], "--output_dir", str(output),
         "--output_format", "exr", "--outputs", "cutout", "fg",
         "--frame_dir_linear", "--frame_dir_fps", str(fps),
