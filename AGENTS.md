@@ -6,7 +6,7 @@
 
 ## Where changes go
 
-- `extension/` is the tested Apple Silicon release source. `experimental/extension/` is a separate build for Apple Silicon and  untested Windows with NVIDIA CUDA. The default atm is the 0.3.x build, the "cross platform" is the 0.4.x build. The goal is to make the 0.4.x build the normal one, but until someone tests it 0.3.x will remain the default.
+- `extension/` is the default Apple Silicon release source. `experimental/extension/` is a separate build for Apple Silicon and untested Windows with NVIDIA CUDA. Use the Mac version the experimental build is based on followed by a SemVer prerelease suffix such as `0.3.18-experimental.1`. Advance the suffix for work on that base and change the base version when the Mac changes are carried over.
 
 - Put release-facing usage and installation docs in `README.md` and `Setup.md`. Use `experimental/README.md` and `experimental/Setup.md` for the experimental build. Put documentation images in `images/`.
 - Use the workspace's sibling `../test-footage/` for local clips and blend files, and `../.setup/` for temporary Blender probes and logs. Keep generated frames, analysis caches, model weights, and installed runtimes outside the repository. Saved blend files can reference analysis caches, so check before deleting caches or changing their layout.

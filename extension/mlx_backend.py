@@ -59,11 +59,16 @@ def analysis_command(executable, models, config, destination, screen, profile):
         "--input", str(source), "--output-dir", str(destination),
         "--height", str(height), "--width", str(width),
         "--precision", "fp16", "--screen", screen,
+        "--despill-strength", str(config["despill_strength"]),
         "--hann-chunk", "1", "--hann-stride", "1",
         "--image-sequence", "--outputs", *(folder for folder, _, _ in OUTPUTS),
     ]
     if hint := config.get("hint"):
-        command.extend(("--hint-first-frame", hint["path"]))
+        hint_option = "--hint-video" if hint["every_frame"] else "--hint-first-frame"
+        command = [
+            str(geometry_python(executable)), "-I", str(Path(__file__).with_name("hint_inference.py")),
+            str(hint["confidence"]), *command[1:], hint_option, hint["path"],
+        ]
     if config["context"] == "strip":
         output_folders = [str(destination / folder) for folder, _, _ in OUTPUTS]
         return [

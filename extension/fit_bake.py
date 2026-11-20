@@ -11,11 +11,19 @@ import numpy as np
 
 
 def fit_frames(folder, width, height, quarter_turns, hint=None):
+    frames = sorted(folder.glob("*.png"))
     geometry = []
-    for path, turns in zip(sorted(folder.glob("*.png")), quarter_turns, strict=True):
+    for path, turns in zip(frames, quarter_turns, strict=True):
         geometry.append(fit_frame(path, width, height, turns))
-    if hint and fit_frame(hint, width, height, quarter_turns[0]) != geometry[0]:
-        raise ValueError("The matte hint and its source frame have different bake dimensions.")
+    if hint is not None:
+        if hint.is_dir():
+            mattes = [hint / path.name for path in frames]
+            hint_frames = zip(mattes, quarter_turns, geometry, strict=True)
+        else:
+            hint_frames = [(hint, quarter_turns[0], geometry[0])]
+        for path, turns, source_geometry in hint_frames:
+            if fit_frame(path, width, height, turns) != source_geometry:
+                raise ValueError(f"Matte hint {path.name} has different bake dimensions from its source frame.")
     (folder / "geometry.json").write_text(json.dumps(geometry))
 
 

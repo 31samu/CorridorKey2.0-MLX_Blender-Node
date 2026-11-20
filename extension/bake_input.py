@@ -79,6 +79,10 @@ def bake(config):
         image_input = scale.inputs["Image"]
     hint = config.get("hint")
     if hint:
+        hint_path = Path(hint["path"])
+        hint_sequence = hint.get("every_frame", False)
+        if hint_sequence:
+            hint_path.mkdir()
         hint_node = tree.nodes[hint["node"]]
         hint_socket = next(socket for socket in hint_node.outputs if socket.identifier == hint["socket"])
         hint_value = tree.nodes.new("ShaderNodeMath")
@@ -135,13 +139,14 @@ def bake(config):
         output_path = destination / f"{index:06d}.png"
         render.filepath = str(output_path)
         bpy.ops.render.render(write_still=True, scene=scene.name)
-        if hint and index == 0:
+        if hint and (hint_sequence or index == 0):
+            matte_path = hint_path / output_path.name if hint_sequence else hint_path
             tree.links.new(hint_value.outputs[0], image_input)
             view.view_transform = "Raw"
-            render.filepath = hint["path"]
+            render.filepath = str(matte_path)
             bpy.ops.render.render(write_still=True, scene=scene.name)
-            if not Path(hint["path"]).is_file():
-                raise RuntimeError("Blender did not bake the first-frame matte hint.")
+            if not matte_path.is_file():
+                raise RuntimeError(f"Blender did not bake the matte hint for frame {frame}.")
             view.view_transform = "Standard"
             tree.links.new(source, image_input)
         if context == "strip":

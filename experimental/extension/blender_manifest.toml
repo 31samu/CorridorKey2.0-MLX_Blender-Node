@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "corridorkey_mlx_compositor"
-version = "0.4.3"
+version = "0.3.18-experimental.3"
 name = "CorridorKey Node (Experimental)"
 tagline = "Key green-screen footage with CorridorKey2.0"
 maintainer = "Samuel Kremer (e1samu)"

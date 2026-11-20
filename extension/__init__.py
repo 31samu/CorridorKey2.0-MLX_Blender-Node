@@ -10,7 +10,8 @@ import subprocess
 import uuid
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
+from bpy.app.handlers import persistent
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import AddonPreferences, CompositorNodeCustomGroup, Operator
 
 from . import mlx_backend as backend
@@ -24,6 +25,14 @@ JOBS = {}
 ANALYSIS_BUSY_MESSAGE = "Wait for analysis to finish."
 MORE_OUTPUTS = ("Matte", *FOREGROUND_OUTPUTS, "Edges")
 ALPHA_HINT = "Alpha Hint"
+LEGACY_ALPHA_HINT = "Alpha Hint (first frame)"
+HINT_CONFIDENCE = "Alpha Hint Confidence"
+HINT_FRAMES = "Hint Frames"
+DESPILL_STRENGTH = "Despill Strength"
+FIRST_FRAME = "First Frame"
+ALL_FRAMES = "All Frames"
+ANALYSIS_SETTINGS = "Analysis Settings"
+HINT_DESCRIPTION = "Rough alpha for Start Frame or every analyzed frame. A white overlay previews the hint."
 GARBAGE_MASK = "Garbage Mask"
 PREVIEW_NODE = "Mask Preview"
 BAKE_PROGRESS = re.compile(rb"^Bake (\d+)/(\d+)$", re.MULTILINE)
@@ -147,6 +156,13 @@ class CorridorKeyNode(CompositorNodeCustomGroup):
         name="Model resolution",
         items=backend.PROFILE_ITEMS,
     )
+    # Keep the RNA properties so Blender can load and migrate the earlier build's settings.
+    alpha_hint_confidence: FloatProperty(default=0.8, min=0.0, max=1.0, options={"HIDDEN"})
+    alpha_hint_mode: EnumProperty(
+        items=(("FIRST", FIRST_FRAME, ""), ("ALL", ALL_FRAMES, "")),
+        default="FIRST", options={"HIDDEN"},
+    )
+    despill_strength: FloatProperty(default=1.0, min=0.0, max=1.0, options={"HIDDEN"})
     status: StringProperty()
 
     def init(self, context):
@@ -165,6 +181,8 @@ class CorridorKeyNode(CompositorNodeCustomGroup):
         add_mask_preview(tree)
         update_image_output(tree)
         self.node_tree = tree
+        self.inputs[HINT_FRAMES].default_value = FIRST_FRAME
+        self.outputs[ANALYSIS_SETTINGS].hide = True
         self.width = 245
 
     def copy(self, source_node):
@@ -182,8 +200,9 @@ class CorridorKeyNode(CompositorNodeCustomGroup):
 
     def draw_buttons(self, context, layout):
         job = JOBS.get(self.as_pointer())
+        baked = has_bake(self)
         fields = layout.column()
-        fields.enabled = job is None
+        fields.enabled = job is None and not baked
         linked = image_is_linked(self)
         for property_name, label in (("screen", "Screen"), ("profile", "Model resolution")):
             field = fields.split(factor=0.52, align=True)
@@ -197,7 +216,7 @@ class CorridorKeyNode(CompositorNodeCustomGroup):
                 layout.label(text=job.message)
             else:
                 layout.progress(factor=job.progress, type="BAR", text=job.message)
-        elif has_bake(self):
+        elif baked:
             layout.operator("node.corridorkey_mlx_clear_bake", text="Clear Bake").node_name = self.name
             if self.status:
                 layout.label(text=self.status)
@@ -215,7 +234,7 @@ class CorridorKeyNode(CompositorNodeCustomGroup):
 
 def add_processing_sockets(tree):
     for name, description in (
-        (ALPHA_HINT, "Rough alpha for the first analyzed frame. A white overlay previews the foreground hint."),
+        (ALPHA_HINT, HINT_DESCRIPTION),
         (GARBAGE_MASK, "White keeps the foreground. The preview darkens excluded areas before analysis."),
     ):
         socket = tree.interface.new_socket(
@@ -278,6 +297,112 @@ def organize_sockets(tree):
     for index, name in enumerate(MORE_OUTPUTS):
         interface.move_to_parent(sockets["OUTPUT", name], panel, index)
     interface.move_to_parent(sockets["INPUT", ALPHA_HINT], panel, len(MORE_OUTPUTS))
+    add_analysis_controls(tree, sockets["INPUT", ALPHA_HINT])
+    fold_more_panel(interface)
+
+
+def fold_more_panel(interface):
+    more = interface.items_tree.get("More")
+    if more is None:
+        return
+    items = {item.name: item for item in more.interface_items}
+    if "Additional Outputs" in items:
+        return
+    for label, names in (
+        ("Additional Outputs", (*MORE_OUTPUTS, ANALYSIS_SETTINGS)),
+        ("Alpha Hint Settings", (ALPHA_HINT, HINT_CONFIDENCE, HINT_FRAMES)),
+    ):
+        panel = interface.new_panel(label, default_closed=True)
+        interface.move_to_parent(panel, more, len(more.interface_items))
+        for position, name in enumerate(names):
+            interface.move_to_parent(items[name], panel, position)
+
+
+def add_analysis_controls(tree, hint):
+    interface = tree.interface
+    for offset, (name, default, description) in enumerate((
+        (HINT_CONFIDENCE, 0.8, "How strongly the model follows Alpha Hint during analysis"),
+        (HINT_FRAMES, None, "Sample the hint at Start Frame or at every analyzed frame"),
+        (DESPILL_STRENGTH, 1.0, "How much green or blue spill to remove during analysis. Clear the bake to change it."),
+    ), start=1):
+        socket = interface.items_tree.get(name)
+        if socket is None:
+            socket = interface.new_socket(
+                name=name, in_out="INPUT",
+                socket_type="NodeSocketMenu" if default is None else "NodeSocketFloat",
+                description=description,
+            )
+            if default is not None:
+                socket.subtype = "FACTOR"
+                socket.min_value = 0.0
+                socket.max_value = 1.0
+                socket.default_value = default
+        interface.move_to_parent(socket, hint.parent, hint.position + offset)
+
+    if old_mode := interface.items_tree.get("Hint Every Frame"):
+        interface.remove(old_mode)
+
+    # Connect the bake options to a private output so Blender keeps their
+    # native controls active without routing their values into the image.
+    settings_output = interface.new_socket(name=ANALYSIS_SETTINGS, in_out="OUTPUT", socket_type="NodeSocketVector")
+    interface.move_to_parent(settings_output, hint.parent, len(hint.parent.interface_items))
+    nodes, links = tree.nodes, tree.links
+    group_input = next(n for n in nodes if n.type == "GROUP_INPUT")
+    group_output = next(n for n in nodes if n.type == "GROUP_OUTPUT" and n.is_active_output)
+    menu = nodes.new("GeometryNodeMenuSwitch")
+    menu.data_type = "FLOAT"
+    for item, label in zip(menu.enum_items, (FIRST_FRAME, ALL_FRAMES), strict=True):
+        item.name = label
+    menu.inputs[FIRST_FRAME].default_value = 0.0
+    menu.inputs[ALL_FRAMES].default_value = 1.0
+    links.new(group_input.outputs[HINT_FRAMES], menu.inputs["Menu"])
+    menu.inputs["Menu"].default_value = FIRST_FRAME
+    interface.items_tree[HINT_FRAMES].default_value = FIRST_FRAME
+    settings = nodes.new("ShaderNodeCombineXYZ")
+    settings.label = ANALYSIS_SETTINGS
+    links.new(group_input.outputs[HINT_CONFIDENCE], settings.inputs["X"])
+    links.new(menu.outputs[0], settings.inputs["Y"])
+    links.new(group_input.outputs[DESPILL_STRENGTH], settings.inputs["Z"])
+    links.new(settings.outputs[0], group_output.inputs[ANALYSIS_SETTINGS])
+
+
+@persistent
+def upgrade_analysis_controls(_unused=None):
+    old_nodes = []
+    groups = set()
+    for tree in bpy.data.node_groups:
+        if tree.bl_idname != "CompositorNodeTree" or not tree.is_editable:
+            continue
+        for node in tree.nodes:
+            if node.bl_idname != NODE_ID or not node.node_tree or not node.node_tree.is_editable:
+                continue
+            groups.add(node.node_tree)
+            if node.outputs.get(ANALYSIS_SETTINGS) is None:
+                old_nodes.append((
+                    node,
+                    socket_setting(node, HINT_CONFIDENCE, node.alpha_hint_confidence),
+                    socket_setting(node, "Hint Every Frame", node.alpha_hint_mode == "ALL"),
+                    socket_setting(node, DESPILL_STRENGTH, node.despill_strength),
+                ))
+    for node, confidence, every_frame, despill in old_nodes:
+        group = node.node_tree
+        if node.outputs.get(ANALYSIS_SETTINGS) is None:
+            interface = group.interface
+            hint = interface.items_tree.get(ALPHA_HINT) or interface.items_tree.get(LEGACY_ALPHA_HINT)
+            if hint is None or hint.parent is None:
+                continue
+            hint.name = ALPHA_HINT
+            hint.description = HINT_DESCRIPTION
+            hint.parent.name = "More"
+            add_analysis_controls(group, hint)
+        node.inputs[HINT_CONFIDENCE].default_value = confidence
+        node.inputs[HINT_FRAMES].default_value = ALL_FRAMES if every_frame else FIRST_FRAME
+        node.inputs[DESPILL_STRENGTH].default_value = despill
+        node.outputs[ANALYSIS_SETTINGS].hide = True
+    for group in groups:
+        if group.interface.items_tree.get(ANALYSIS_SETTINGS) is not None:
+            fold_more_panel(group.interface)
+            sync_analysis_controls(group)
 
 
 def add_preview_mix(tree, label):
@@ -335,6 +460,32 @@ def update_image_output(tree):
         source = group_input.outputs["Image"]
     if not any(link.from_socket == source for link in image_input.links):
         tree.links.new(source, image_input)
+    sync_analysis_controls(tree)
+
+
+def sync_analysis_controls(tree):
+    output = next(node for node in tree.nodes if node.type == "GROUP_OUTPUT" and node.is_active_output)
+    target = output.inputs.get(ANALYSIS_SETTINGS)
+    if target is None:
+        return
+    # Blender dims unused group inputs. The private settings link controls
+    # editability while preserving the values and the dropdown's menu definition.
+    if tree.nodes[KEYED_FRAMES].image is not None:
+        if target.is_linked:
+            tree.links.remove(target.links[0])
+        return
+    settings = next(
+        (node for node in tree.nodes if node.bl_idname == "ShaderNodeCombineXYZ" and node.label == ANALYSIS_SETTINGS),
+        None,
+    )
+    if settings is None:
+        return
+    # Previously saved bakes may have disconnected just the despill input.
+    if not settings.inputs["Z"].is_linked:
+        group_input = next(node for node in tree.nodes if node.type == "GROUP_INPUT")
+        tree.links.new(group_input.outputs[DESPILL_STRENGTH], settings.inputs["Z"])
+    if not target.is_linked:
+        tree.links.new(settings.outputs[0], target)
 
 
 def image_input_link(node, require_valid=True, socket_name="Image"):
@@ -349,6 +500,17 @@ def image_input_link(node, require_valid=True, socket_name="Image"):
 
 def image_is_linked(node):
     return image_input_link(node) is not None
+
+
+def socket_setting(node, name, default):
+    socket = node.inputs.get(name)
+    return socket.default_value if socket is not None else default
+
+
+def analysis_setting(node, name, default):
+    if image_input_link(node, socket_name=name):
+        raise ValueError(f"Disconnect the {name} input and set it under More.")
+    return socket_setting(node, name, default)
 
 
 def strip_compositor(scene, tree):
@@ -411,12 +573,18 @@ def bake_config(context, node, destination, bake_size):
         "destination": str(destination / "baked-input"),
         "source_node": link.from_node.name,
         "source_socket": link.from_socket.identifier,
+        "despill_strength": analysis_setting(node, DESPILL_STRENGTH, 1.0),
     }
-    if hint := image_input_link(node, socket_name=ALPHA_HINT):
+    hint = image_input_link(node, socket_name=ALPHA_HINT) or image_input_link(node, socket_name=LEGACY_ALPHA_HINT)
+    confidence = analysis_setting(node, HINT_CONFIDENCE, 0.8) if hint else 0.0
+    if confidence > 0:
+        every_frame = analysis_setting(node, HINT_FRAMES, FIRST_FRAME) == ALL_FRAMES
         config["hint"] = {
             "node": hint.from_node.name,
             "socket": hint.from_socket.identifier,
-            "path": str(destination / "matte-hint.png"),
+            "path": str(destination / ("matte-hints" if every_frame else "matte-hint.png")),
+            "every_frame": every_frame,
+            "confidence": confidence,
         }
     strip, modifier = strip_compositor(scene, tree)
     if strip:
@@ -694,6 +862,8 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.NODE_MT_category_compositor_keying.append(draw_keying_menu)
+    bpy.app.handlers.load_post.append(upgrade_analysis_controls)
+    bpy.app.timers.register(upgrade_analysis_controls, first_interval=0)
 
 
 def unregister():
@@ -702,5 +872,8 @@ def unregister():
     for job in tuple(JOBS.values()):
         job.cancel(None)
     bpy.types.NODE_MT_category_compositor_keying.remove(draw_keying_menu)
+    bpy.app.handlers.load_post.remove(upgrade_analysis_controls)
+    if bpy.app.timers.is_registered(upgrade_analysis_controls):
+        bpy.app.timers.unregister(upgrade_analysis_controls)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
